@@ -1,0 +1,83 @@
+name: Sync upstream golang/crypto
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'  # every Monday 06:00 UTC
+  workflow_dispatch:       # allow manual trigger
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history needed for rebase
+
+      - name: Configure git
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream tags
+        run: |
+          git remote add upstream https://github.com/golang/crypto.git
+          git fetch upstream --tags
+
+      - name: Find latest upstream tag
+        id: upstream
+        run: |
+          # upstream tags look like v0.50.0
+          tag=$(git tag --list 'v*' --sort=-version:refname \
+            | grep -v -- '-hostbased' \
+            | head -1)
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Latest upstream tag: $tag"
+
+      - name: Check if already synced
+        id: check
+        run: |
+          tag="${{ steps.upstream.outputs.tag }}"
+          if git tag --list "${tag}-hostbased.*" | grep -q .; then
+            echo "skip=true"  >> "$GITHUB_OUTPUT"
+            echo "Already have a hostbased tag for $tag — skipping"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "No hostbased tag for $tag — will rebase"
+          fi
+
+      - name: Rebase hostbased commits onto new upstream tag
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          tag="${{ steps.upstream.outputs.tag }}"
+
+          # Two custom commits on top of upstream: the hostbased patch and this
+          # workflow file. Both are new files so they will never conflict.
+          git rebase "$tag"
+
+      - name: Set up Go
+        if: steps.check.outputs.skip == 'false'
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Verify patch builds
+        if: steps.check.outputs.skip == 'false'
+        run: go build ./ssh/...
+
+      - name: Test ssh package
+        if: steps.check.outputs.skip == 'false'
+        run: go test ./ssh/... -count=1 -timeout 60s
+
+      - name: Create new hostbased tag and push
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          tag="${{ steps.upstream.outputs.tag }}"
+          new_tag="${tag}-hostbased.1"
+
+          git tag "$new_tag"
+          git push origin master --force-with-lease
+          git push origin "$new_tag"
+          echo "Pushed $new_tag"
